@@ -117,6 +117,26 @@
     background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px;
     font-size: 13px; z-index: 40; display: none; box-shadow: var(--shadow); max-width: 90vw;
   }
+
+  /* ---------- Auth ---------- */
+  #authScreen {
+    position: fixed; inset: 0; background: var(--bg); z-index: 50;
+    display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  #authScreen.open { display: flex; }
+  .auth-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+    box-shadow: var(--shadow); padding: 28px 24px; width: 100%; max-width: 360px;
+  }
+  .auth-card h2 { font-size: 20px; margin-bottom: 4px; text-align: center; }
+  .auth-card .sub { font-size: 13px; color: var(--muted); text-align: center; margin-bottom: 18px; }
+  .auth-card input {
+    width: 100%; font: inherit; padding: 11px 12px; border: 1px solid var(--border);
+    border-radius: 9px; background: var(--bg); color: var(--text); margin-bottom: 10px;
+  }
+  .auth-card .primary { width: 100%; padding: 11px; font-size: 15px; margin-top: 4px; }
+  .auth-err { color: #e53935; font-size: 13px; min-height: 18px; margin: 2px 0 4px; }
+  .auth-toggle { background: none; border: none; color: var(--accent); width: 100%; margin-top: 12px; font-size: 13px; }
   #nowLine {
     position: absolute; height: 2px; background: var(--nowline); z-index: 3;
     pointer-events: none; left: 0; right: 0;
@@ -200,8 +220,8 @@
 <div id="gridWrap"><div id="grid"></div></div>
 
 <div id="menu">
-  <button id="mLoad">📂 Load from OneDrive file</button>
-  <button id="mSave">💾 Save to OneDrive file</button>
+  <button id="mLoad">📂 Import backup file</button>
+  <button id="mSave">💾 Export backup file</button>
   <hr>
   <button id="mCopyPrev">📋 Copy last week's plan</button>
   <button id="mStats">📊 Week stats</button>
@@ -209,6 +229,8 @@
   <hr>
   <button id="mSettings">⚙️ Settings</button>
   <button id="mInstall" style="display:none">📲 Install app</button>
+  <hr>
+  <button id="mSignOut">👤 Sign out</button>
 </div>
 
 <!-- Entry modal -->
@@ -296,12 +318,33 @@
 <div id="toast"></div>
 <input type="file" id="filePick" accept=".json" style="display:none">
 
+<!-- Auth screen -->
+<div id="authScreen">
+  <div class="auth-card">
+    <h2>📅 Week Planner</h2>
+    <p class="sub" id="authSub">Sign in to your planner</p>
+    <input type="email" id="aEmail" placeholder="Email" autocomplete="email">
+    <input type="password" id="aPass" placeholder="Password (6+ characters)" autocomplete="current-password">
+    <div class="auth-err" id="authErr"></div>
+    <button class="primary" id="aGo">Sign in</button>
+    <button class="auth-toggle" id="aToggle">New here? Create an account</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script>
 "use strict";
 /* ================= Data ================= */
 const LS_KEY = "weekPlannerData";
 const DATA_FILENAME = "week-planner-data.json";
 const DAY_NAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+
+const SUPA_URL = "https://ckaahrsyjeikfnqdbpbo.supabase.co";
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNrYWFocnN5amVpa2ZucWRicGJvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyNDA4NDYsImV4cCI6MjA5ODgxNjg0Nn0.Amm6sk-XIezov1qXNHZvwZvnLS3aGydeGt7SaF4Kn4s";
+const supa = window.supabase ? window.supabase.createClient(SUPA_URL, SUPA_KEY) : null;
+let uid = null;                // signed-in user id
+let cloudState = "sync";       // sync | ok | offline
+function lsKey() { return uid ? LS_KEY + "_" + uid : LS_KEY; }
 
 const defaultData = () => ({
   version: 1,
@@ -328,7 +371,7 @@ function migrate(d) {
   return d;
 }
 
-let data = loadLocal();
+let data = defaultData();   // real data loads after sign-in (per-user storage)
 let curMonday = mondayOf(new Date());
 let selDay = jsDayToIdx(new Date().getDay());   // mobile selected day
 let editingId = null;
@@ -338,17 +381,17 @@ let saveTimer = null;
 
 function loadLocal() {
   try {
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = localStorage.getItem(lsKey());
     if (raw) { const d = JSON.parse(raw); if (d && d.weeks && d.settings) return migrate(d); }
   } catch (e) {}
   return defaultData();
 }
 function persistLocal() {
   data.savedAt = new Date().toISOString();
-  localStorage.setItem(LS_KEY, JSON.stringify(data));
+  localStorage.setItem(lsKey(), JSON.stringify(data));
   dirty = true;
   updateSyncStatus();
-  scheduleFileSave();
+  schedulePush();
 }
 
 /* ================= Date helpers ================= */
@@ -826,8 +869,14 @@ const statusEl = document.getElementById("syncStatus");
 
 function updateSyncStatus(msg) {
   if (msg) { statusEl.textContent = msg; statusEl.classList.remove("dirty"); return; }
-  if (dirty) { statusEl.textContent = fileHandle ? "Saving…" : "Not saved to file"; statusEl.classList.add("dirty"); }
-  else { statusEl.textContent = fileHandle ? "✓ Synced" : ""; statusEl.classList.remove("dirty"); }
+  if (!uid) { statusEl.textContent = ""; statusEl.classList.remove("dirty"); return; }
+  if (cloudState === "offline") {
+    statusEl.textContent = "Offline — saved on this device"; statusEl.classList.add("dirty");
+  } else if (dirty || cloudState === "sync") {
+    statusEl.textContent = "Syncing…"; statusEl.classList.add("dirty");
+  } else {
+    statusEl.textContent = "✓ Synced"; statusEl.classList.remove("dirty");
+  }
 }
 
 /* Persist the file handle across sessions via IndexedDB (desktop Chrome/Edge). */
@@ -853,12 +902,6 @@ async function restoreHandle() {
     else if (h) fileHandle = h;   // will re-request permission on first save
   } catch (e) {}
   updateSyncStatus();
-}
-
-function scheduleFileSave() {
-  if (!fileHandle || !hasFS) return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => saveToFile(true), 1500);
 }
 
 async function saveToFile(auto) {
@@ -927,10 +970,10 @@ function applyLoaded(text) {
     if (!confirm("The file is OLDER than what's on this device.\nLoad it anyway and overwrite this device's plan?")) return;
   }
   data = migrate(d);
-  localStorage.setItem(LS_KEY, JSON.stringify(data));
-  dirty = false;
+  localStorage.setItem(lsKey(), JSON.stringify(data));
   updateSyncStatus("✓ Loaded from file");
   render();
+  schedulePush();
 }
 
 document.getElementById("mLoad").onclick = () => { closeMenu(); loadFromFile(); };
@@ -945,10 +988,136 @@ setInterval(() => {   // keep the "now" line moving
   if (line || isSameDate(new Date(), addDays(curMonday, selDay)) || !isMobile()) render();
 }, 60000);
 
-restoreHandle();
-render();
-// Scroll so the working day is in view (roughly 08:00)
-setTimeout(() => { gridWrap.scrollTop = Math.max(0, (8 - data.settings.dayStart) * SLOT_H() - 10); }, 0);
+/* ================= Cloud sync ================= */
+let pushTimer = null;
+function schedulePush() {
+  if (!uid || !supa) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushCloud, 1000);
+}
+async function pushCloud() {
+  if (!uid || !supa) return;
+  pushTimer = null;
+  try {
+    const { error } = await supa.from("planner").upsert({ user_id: uid, data, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    dirty = false; cloudState = "ok";
+  } catch (e) { cloudState = "offline"; }
+  updateSyncStatus();
+}
+async function initialCloudSync() {
+  cloudState = "sync"; updateSyncStatus();
+  try {
+    const { data: row, error } = await supa.from("planner").select("data").maybeSingle();
+    if (error) throw error;
+    if (row && row.data) {
+      const remote = migrate(row.data);
+      if (!data.savedAt || (remote.savedAt && remote.savedAt > data.savedAt)) {
+        data = remote;
+        localStorage.setItem(lsKey(), JSON.stringify(data));
+        render();
+      } else if (remote.savedAt !== data.savedAt) {
+        schedulePush();
+      }
+    } else {
+      // First sign-in for this account: adopt any pre-account data saved on this device
+      if (!Object.keys(data.weeks).length && !data.recurring.length) {
+        try {
+          const legacy = localStorage.getItem(LS_KEY);
+          if (legacy) {
+            const d = JSON.parse(legacy);
+            if (d && d.weeks && d.settings) {
+              data = migrate(d);
+              localStorage.setItem(lsKey(), JSON.stringify(data));
+              render();
+            }
+          }
+        } catch (e) {}
+      }
+      schedulePush();
+    }
+    cloudState = "ok";
+    if (!pushTimer) dirty = false;
+  } catch (e) { cloudState = "offline"; }
+  updateSyncStatus();
+}
+function subscribeRealtime() {
+  supa.channel("planner-sync")
+    .on("postgres_changes",
+        { event: "*", schema: "public", table: "planner", filter: "user_id=eq." + uid },
+        (payload) => {
+          const row = payload.new;
+          if (!row || !row.data) return;
+          const remote = migrate(typeof row.data === "string" ? JSON.parse(row.data) : row.data);
+          if (remote.savedAt && (!data.savedAt || remote.savedAt > data.savedAt)) {
+            data = remote;
+            localStorage.setItem(lsKey(), JSON.stringify(data));
+            dirty = false; cloudState = "ok";
+            render(); updateSyncStatus();
+          }
+        })
+    .subscribe();
+}
+window.addEventListener("online", () => { if (uid && dirty) pushCloud(); });
+
+/* ================= Auth + boot ================= */
+const authScreen = document.getElementById("authScreen");
+let authMode = "signin";
+document.getElementById("aToggle").onclick = () => {
+  authMode = authMode === "signin" ? "signup" : "signin";
+  document.getElementById("aGo").textContent = authMode === "signin" ? "Sign in" : "Create account";
+  document.getElementById("aToggle").textContent = authMode === "signin"
+    ? "New here? Create an account" : "Already have an account? Sign in";
+  document.getElementById("authSub").textContent = authMode === "signin"
+    ? "Sign in to your planner" : "Your own planner — separate from anyone else's";
+  document.getElementById("authErr").textContent = "";
+};
+document.getElementById("aGo").onclick = async () => {
+  const email = document.getElementById("aEmail").value.trim();
+  const pass = document.getElementById("aPass").value;
+  const err = document.getElementById("authErr");
+  if (!email || pass.length < 6) { err.textContent = "Enter your email and a password of 6+ characters."; return; }
+  err.textContent = "";
+  const btn = document.getElementById("aGo");
+  btn.disabled = true;
+  const { error } = authMode === "signup"
+    ? await supa.auth.signUp({ email, password: pass })
+    : await supa.auth.signInWithPassword({ email, password: pass });
+  btn.disabled = false;
+  if (error) err.textContent = error.message;
+};
+document.getElementById("aPass").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") document.getElementById("aGo").click();
+});
+document.getElementById("mSignOut").onclick = async () => {
+  closeMenu();
+  if (confirm("Sign out of the planner on this device?")) await supa.auth.signOut();
+};
+
+function startApp(session) {
+  uid = session.user.id;
+  authScreen.classList.remove("open");
+  data = loadLocal();
+  render();
+  gridWrap.scrollTop = Math.max(0, (8 - data.settings.dayStart) * SLOT_H() - 10);
+  initialCloudSync();
+  subscribeRealtime();
+}
+async function boot() {
+  restoreHandle();
+  if (!supa) {   // client library unreachable (first load offline) — run on this device only
+    data = loadLocal(); render();
+    return;
+  }
+  const { data: { session } } = await supa.auth.getSession();
+  if (session) startApp(session);
+  else { render(); authScreen.classList.add("open"); }
+  supa.auth.onAuthStateChange((ev, sess) => {
+    if (sess && !uid) startApp(sess);
+    if (ev === "SIGNED_OUT") { uid = null; location.reload(); }
+  });
+}
+boot();
 
 /* ================= PWA ================= */
 if ("serviceWorker" in navigator && location.protocol === "https:") {
