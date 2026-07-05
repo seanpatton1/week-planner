@@ -107,6 +107,16 @@
   }
   .entry .t { font-weight: 600; }
   .entry .c { opacity: .85; font-size: 11px; }
+  .entry .n { position: absolute; top: 3px; right: 5px; font-size: 10px; }
+  .entry .rz { position: absolute; left: 0; right: 0; bottom: 0; height: 9px; cursor: ns-resize; }
+  .entry.dragging { opacity: .55; pointer-events: none; }
+  .entry.lift { outline: 3px solid #fff; box-shadow: 0 6px 18px rgba(0,0,0,.5); z-index: 6; }
+  .hour-cell.drop { background: var(--accent); opacity: .4; }
+  #toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px;
+    font-size: 13px; z-index: 40; display: none; box-shadow: var(--shadow); max-width: 90vw;
+  }
   #nowLine {
     position: absolute; height: 2px; background: var(--nowline); z-index: 3;
     pointer-events: none; left: 0; right: 0;
@@ -129,10 +139,11 @@
   .modal h2 { font-size: 16px; margin-bottom: 14px; }
   .field { margin-bottom: 12px; }
   .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-  .field input[type=text], .field select {
+  .field input[type=text], .field select, .field textarea {
     width: 100%; font: inherit; padding: 9px 10px; border: 1px solid var(--border);
     border-radius: 8px; background: var(--bg); color: var(--text);
   }
+  .field textarea { resize: vertical; }
   .row2 { display: flex; gap: 10px; }
   .row2 .field { flex: 1; }
   .cat-swatches { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -193,6 +204,7 @@
   <button id="mSave">💾 Save to OneDrive file</button>
   <hr>
   <button id="mCopyPrev">📋 Copy last week's plan</button>
+  <button id="mStats">📊 Week stats</button>
   <button id="mClearWeek">🗑 Clear this week</button>
   <hr>
   <button id="mSettings">⚙️ Settings</button>
@@ -225,8 +237,18 @@
       <label>Category</label>
       <div class="cat-swatches" id="eCats"></div>
     </div>
+    <div class="field">
+      <label>Notes (optional)</label>
+      <textarea id="eNotes" rows="2" placeholder="Anything extra worth remembering…"></textarea>
+    </div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;color:var(--text)">
+        <input type="checkbox" id="eRepeat"> Repeat every week
+      </label>
+    </div>
     <div class="modal-actions">
       <button class="danger" id="eDelete" style="display:none">Delete</button>
+      <button id="eSkip" style="display:none">Skip this week</button>
       <span class="spacer"></span>
       <button id="eCancel">Cancel</button>
       <button class="primary" id="eSave">Save</button>
@@ -260,6 +282,18 @@
   </div>
 </div>
 
+<!-- Stats modal -->
+<div class="overlay" id="statOverlay">
+  <div class="modal">
+    <h2>This week by category</h2>
+    <div id="statBody"></div>
+    <div class="modal-actions">
+      <button class="primary" id="statClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
 <input type="file" id="filePick" accept=".json" style="display:none">
 
 <script>
@@ -284,8 +318,15 @@ const defaultData = () => ({
       { id: "other",  name: "Other",    color: "#5a6b7b" }
     ]
   },
-  weeks: {}   // { "YYYY-MM-DD (monday)": [ {id, day 0-6, hour, duration, title, cat} ] }
+  recurring: [],   // entries that repeat every week: {id, day, hour, duration, title, cat, notes}
+  exceptions: {},  // { weekKey: [recurringId] } — weeks where a recurring entry is skipped
+  weeks: {}   // { "YYYY-MM-DD (monday)": [ {id, day 0-6, hour, duration, title, cat, notes} ] }
 });
+function migrate(d) {
+  d.recurring = d.recurring || [];
+  d.exceptions = d.exceptions || {};
+  return d;
+}
 
 let data = loadLocal();
 let curMonday = mondayOf(new Date());
@@ -298,7 +339,7 @@ let saveTimer = null;
 function loadLocal() {
   try {
     const raw = localStorage.getItem(LS_KEY);
-    if (raw) { const d = JSON.parse(raw); if (d && d.weeks && d.settings) return d; }
+    if (raw) { const d = JSON.parse(raw); if (d && d.weeks && d.settings) return migrate(d); }
   } catch (e) {}
   return defaultData();
 }
@@ -326,6 +367,24 @@ function hh(h) { return String(h).padStart(2,"0") + ":00"; }
 function isSameDate(a,b){ return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate(); }
 
 function entries() { return data.weeks[wkKey(curMonday)] || []; }
+function recurringForWeek() {
+  const ex = data.exceptions[wkKey(curMonday)] || [];
+  return data.recurring.filter(r => !ex.includes(r.id));
+}
+function allWeekEntries() { return entries().concat(recurringForWeek()); }
+function isRecurring(id) { return data.recurring.some(r => r.id === id); }
+function skipThisWeek(id) {
+  const k = wkKey(curMonday);
+  (data.exceptions[k] = data.exceptions[k] || []).push(id);
+  persistLocal();
+}
+function detachToThisWeek(rec, changes) {
+  // A recurring entry changed for this week only: hide the original here, add a one-off copy
+  skipThisWeek(rec.id);
+  const copy = { ...rec, ...changes, id: "e" + Date.now() + Math.floor(Math.random()*100000) };
+  setEntries(entries().concat(copy));
+  return copy;
+}
 function setEntries(list) {
   if (list.length) data.weeks[wkKey(curMonday)] = list;
   else delete data.weeks[wkKey(curMonday)];
@@ -399,14 +458,15 @@ function render() {
     const date = addDays(curMonday, d);
     const col = document.createElement("div");
     col.className = "day-col" + (isSameDate(date, today) ? " today" : "");
+    col.dataset.day = d;
     for (const h of hours) {
       const cell = document.createElement("div");
       cell.className = "hour-cell"; cell.style.height = SLOT_H() + "px";
-      cell.onclick = () => openEntryModal(null, d, h);
+      cell.onclick = () => cellTapped(d, h);
       col.appendChild(cell);
     }
     // Entries
-    const dayEntries = entries().filter(en => en.day === d).sort((a,b) => a.hour - b.hour);
+    const dayEntries = allWeekEntries().filter(en => en.day === d).sort((a,b) => a.hour - b.hour);
     let prevEnd = -1, inset = 0;
     for (const en of dayEntries) {
       inset = (en.hour < prevEnd) ? inset + 10 : 0;
@@ -421,10 +481,12 @@ function render() {
       el.style.height = (hgt - 5) + "px";
       el.style.background = cat.color;
       el.style.marginLeft = inset + "px";
-      el.innerHTML = "<div class='t'></div><div class='c'></div>";
+      el.innerHTML = "<div class='t'></div><div class='c'></div><div class='n'></div><div class='rz'></div>";
       el.querySelector(".t").textContent = en.title;
       el.querySelector(".c").textContent = hh(en.hour) + "–" + hh(en.hour + en.duration) + " · " + cat.name;
-      el.onclick = (ev) => { ev.stopPropagation(); openEntryModal(en.id); };
+      el.querySelector(".n").textContent = (en.notes ? "📝" : "") + (isRecurring(en.id) ? " ↻" : "");
+      if (moveMode && moveMode.id === en.id) el.classList.add("lift");
+      attachEntryEvents(el, en);
       col.appendChild(el);
     }
     // Now line
@@ -439,6 +501,115 @@ function render() {
     }
     grid.appendChild(col);
   }
+}
+
+/* ================= Move / drag / resize ================= */
+let moveMode = null;       // { id, armed } — mobile long-press "tap to place" mode
+let justDragged = false;   // swallow the click that follows a mouse drag
+const toast = document.getElementById("toast");
+function showToast(msg) { toast.textContent = msg; toast.style.display = msg ? "block" : "none"; }
+function cancelMoveMode() { moveMode = null; showToast(""); render(); }
+
+function cellTapped(d, h) {
+  if (moveMode) { if (moveMode.armed) commitMove(moveMode.id, d, h); return; }
+  openEntryModal(null, d, h);
+}
+function commitMove(id, d, h) {
+  const e = data.settings.dayEnd;
+  const rec = data.recurring.find(r => r.id === id);
+  if (rec) {
+    detachToThisWeek(rec, { day: d, hour: Math.min(h, e - rec.duration) });
+  } else {
+    const list = entries();
+    const en = list.find(x => x.id === id);
+    if (en) { en.day = d; en.hour = Math.min(h, e - en.duration); setEntries(list); }
+  }
+  moveMode = null; showToast("");
+  render();
+}
+function commitResize(id, dur) {
+  const rec = data.recurring.find(r => r.id === id);
+  if (rec) detachToThisWeek(rec, { duration: dur });
+  else {
+    const list = entries();
+    const en = list.find(x => x.id === id);
+    if (en) { en.duration = dur; setEntries(list); }
+  }
+  render();
+}
+
+function attachEntryEvents(el, en) {
+  let lpTimer = null, startX = 0, startY = 0, dragging = false, resizing = false;
+  let hoverCell = null, newDur = en.duration;
+  const isTouch = (ev) => ev.pointerType !== "mouse";
+
+  el.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (justDragged) { justDragged = false; return; }
+    if (moveMode) { if (moveMode.armed) cancelMoveMode(); return; }
+    openEntryModal(en.id);
+  });
+  el.addEventListener("contextmenu", ev => ev.preventDefault());
+
+  el.addEventListener("pointerdown", (ev) => {
+    startX = ev.clientX; startY = ev.clientY; dragging = false;
+    resizing = ev.target.classList.contains("rz") && !isTouch(ev);
+    if (isTouch(ev)) {
+      if (moveMode) return;
+      lpTimer = setTimeout(() => {
+        lpTimer = null;
+        moveMode = { id: en.id, armed: false };
+        el.classList.add("lift");
+        showToast("Moving “" + en.title + "” — tap a slot to place it (tap it again to cancel)");
+        if (navigator.vibrate) navigator.vibrate(30);
+        setTimeout(() => { if (moveMode) moveMode.armed = true; }, 400);
+      }, 450);
+      return;
+    }
+    el.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  });
+
+  el.addEventListener("pointermove", (ev) => {
+    if (isTouch(ev)) {
+      if (lpTimer && Math.hypot(ev.clientX - startX, ev.clientY - startY) > 10) { clearTimeout(lpTimer); lpTimer = null; }
+      return;
+    }
+    if (!el.hasPointerCapture || !el.hasPointerCapture(ev.pointerId)) return;
+    if (resizing) {
+      const rect = el.getBoundingClientRect();
+      newDur = Math.max(1, Math.min(data.settings.dayEnd - en.hour, Math.round((ev.clientY - rect.top) / SLOT_H())));
+      el.style.height = (newDur * SLOT_H() - 5) + "px";
+      dragging = true;
+      return;
+    }
+    if (!dragging && Math.hypot(ev.clientX - startX, ev.clientY - startY) > 5) {
+      dragging = true; el.classList.add("dragging");
+    }
+    if (dragging) {
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      const cell = under && under.closest ? under.closest(".hour-cell") : null;
+      if (hoverCell && hoverCell !== cell) hoverCell.classList.remove("drop");
+      if (cell) cell.classList.add("drop");
+      hoverCell = cell;
+    }
+  });
+
+  el.addEventListener("pointerup", (ev) => {
+    if (isTouch(ev)) { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } return; }
+    if (resizing && dragging) { justDragged = true; commitResize(en.id, newDur); return; }
+    if (dragging) {
+      justDragged = true;
+      el.classList.remove("dragging");
+      if (hoverCell) {
+        hoverCell.classList.remove("drop");
+        const col = hoverCell.parentElement;
+        const idx = Array.prototype.indexOf.call(col.querySelectorAll(".hour-cell"), hoverCell);
+        commitMove(en.id, +col.dataset.day, data.settings.dayStart + idx);
+      } else render();
+    }
+  });
+  el.addEventListener("pointercancel", () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } });
 }
 
 /* ================= Entry modal ================= */
@@ -458,10 +629,15 @@ function fillSelect(sel, opts, val) {
 function openEntryModal(id, day, hour) {
   editingId = id;
   const s = data.settings.dayStart, e = data.settings.dayEnd;
-  const en = id ? entries().find(x => x.id === id) : null;
+  const en = id ? (entries().find(x => x.id === id) || data.recurring.find(x => x.id === id)) : null;
+  const rec = !!(en && isRecurring(en.id));
   document.getElementById("entryTitle").textContent = en ? "Edit entry" : "Add to plan";
   document.getElementById("eDelete").style.display = en ? "" : "none";
+  document.getElementById("eDelete").textContent = rec ? "Delete all weeks" : "Delete";
+  document.getElementById("eSkip").style.display = rec ? "" : "none";
   document.getElementById("eTitle").value = en ? en.title : "";
+  document.getElementById("eNotes").value = (en && en.notes) ? en.notes : "";
+  document.getElementById("eRepeat").checked = rec;
 
   const hourOpts = []; for (let h = s; h < e; h++) hourOpts.push([h, hh(h)]);
   fillSelect(document.getElementById("eHour"), hourOpts, en ? en.hour : hour);
@@ -496,15 +672,25 @@ document.getElementById("eSave").onclick = () => {
     day: +document.getElementById("eDay").value,
     hour: +document.getElementById("eHour").value,
     duration: +document.getElementById("eDur").value,
-    title, cat: modalCat
+    title, cat: modalCat,
+    notes: document.getElementById("eNotes").value.trim()
   };
+  const repeat = document.getElementById("eRepeat").checked;
+  // Remove any previous version from both stores, then put it where it now belongs
+  data.recurring = data.recurring.filter(r => r.id !== en.id);
   const list = entries().filter(x => x.id !== en.id);
-  list.push(en);
+  if (repeat) data.recurring.push(en);
+  else list.push(en);
   setEntries(list);
   closeModals(); render();
 };
 document.getElementById("eDelete").onclick = () => {
+  data.recurring = data.recurring.filter(r => r.id !== editingId);
   setEntries(entries().filter(x => x.id !== editingId));
+  closeModals(); render();
+};
+document.getElementById("eSkip").onclick = () => {
+  skipThisWeek(editingId);
   closeModals(); render();
 };
 document.getElementById("eCancel").onclick = closeModals;
@@ -551,12 +737,56 @@ document.getElementById("sSave").onclick = () => {
 };
 document.getElementById("sCancel").onclick = closeModals;
 
+const statOverlay = document.getElementById("statOverlay");
 function closeModals() {
   entryOverlay.classList.remove("open");
   setOverlay.classList.remove("open");
+  statOverlay.classList.remove("open");
   editingId = null;
 }
-[entryOverlay, setOverlay].forEach(ov => ov.addEventListener("click", ev => { if (ev.target === ov) closeModals(); }));
+[entryOverlay, setOverlay, statOverlay].forEach(ov => ov.addEventListener("click", ev => { if (ev.target === ov) closeModals(); }));
+
+/* ================= Week stats ================= */
+document.getElementById("mStats").onclick = () => {
+  closeMenu();
+  const totals = {};
+  let sum = 0;
+  for (const en of allWeekEntries()) { totals[en.cat] = (totals[en.cat] || 0) + en.duration; sum += en.duration; }
+  const body = document.getElementById("statBody");
+  body.innerHTML = "";
+  const cats = data.settings.categories.filter(c => totals[c.id]);
+  const max = Math.max(1, ...cats.map(c => totals[c.id]));
+  if (!cats.length) {
+    const p = document.createElement("p");
+    p.style.cssText = "color:var(--muted);font-size:14px";
+    p.textContent = "Nothing planned this week yet.";
+    body.appendChild(p);
+  }
+  for (const c of cats) {
+    const row = document.createElement("div"); row.style.marginBottom = "12px";
+    const top = document.createElement("div");
+    top.style.cssText = "display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px";
+    const nm = document.createElement("span"); nm.textContent = c.name;
+    const val = document.createElement("b"); val.textContent = totals[c.id] + (totals[c.id] === 1 ? " hr" : " hrs");
+    top.append(nm, val);
+    const track = document.createElement("div");
+    track.style.cssText = "height:10px;border-radius:5px;background:var(--border);overflow:hidden";
+    const bar = document.createElement("div");
+    bar.style.cssText = "height:100%;border-radius:5px;width:" + (totals[c.id] / max * 100) + "%;background:" + c.color;
+    track.appendChild(bar);
+    row.append(top, track);
+    body.appendChild(row);
+  }
+  if (cats.length) {
+    const tot = document.createElement("p");
+    tot.style.cssText = "font-size:13px;color:var(--muted);margin-top:10px";
+    const freeH = 7 * (data.settings.dayEnd - data.settings.dayStart) - sum;
+    tot.textContent = "Total planned: " + sum + " hrs · unplanned: " + freeH + " hrs";
+    body.appendChild(tot);
+  }
+  statOverlay.classList.add("open");
+};
+document.getElementById("statClose").onclick = closeModals;
 
 /* ================= Menu ================= */
 const menu = document.getElementById("menu");
@@ -696,7 +926,7 @@ function applyLoaded(text) {
   if (data.savedAt && d.savedAt && d.savedAt < data.savedAt) {
     if (!confirm("The file is OLDER than what's on this device.\nLoad it anyway and overwrite this device's plan?")) return;
   }
-  data = d;
+  data = migrate(d);
   localStorage.setItem(LS_KEY, JSON.stringify(data));
   dirty = false;
   updateSyncStatus("✓ Loaded from file");

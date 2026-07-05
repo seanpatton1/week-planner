@@ -1,5 +1,5 @@
 /* Week Planner service worker — offline support */
-const CACHE = "week-planner-v1";
+const CACHE = "week-planner-v2";
 const ASSETS = [
   "./",
   "./index.html",
