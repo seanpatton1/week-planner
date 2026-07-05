@@ -1,5 +1,5 @@
 /* Week Planner service worker — offline support */
-const CACHE = "week-planner-v4";
+const CACHE = "week-planner-v5";
 const ASSETS = [
   "./",
   "./index.html",
@@ -50,7 +50,8 @@ self.addEventListener("fetch", (ev) => {
       const refresh = fetch(req)
         .then((res) => {
           const origin = new URL(req.url).origin;
-          if (res.ok && (origin === location.origin || origin === "https://cdn.jsdelivr.net")) {
+          const CACHEABLE = [location.origin, "https://cdn.jsdelivr.net", "https://fonts.googleapis.com", "https://fonts.gstatic.com"];
+          if (res.ok && CACHEABLE.includes(origin)) {
             const copy = res.clone();
             caches.open(CACHE).then((c) => c.put(req, copy));
           }

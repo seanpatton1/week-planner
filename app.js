@@ -165,7 +165,7 @@ function render() {
   for (const d of days) {
     const date = addDays(curMonday, d);
     const col = document.createElement("div");
-    col.className = "day-col" + (isSameDate(date, today) ? " today" : "");
+    col.className = "day-col" + (d >= 5 ? " wkend" : "") + (isSameDate(date, today) ? " today" : "");
     col.dataset.day = d;
     for (const h of hours) {
       const cell = document.createElement("div");
@@ -187,7 +187,7 @@ function render() {
       el.className = "entry";
       el.style.top = Math.max(top, 0) + 2 + "px";
       el.style.height = (hgt - 5) + "px";
-      el.style.background = cat.color;
+      el.style.backgroundColor = cat.color;
       el.style.marginLeft = inset + "px";
       el.innerHTML = "<div class='t'></div><div class='c'></div><div class='n'></div><div class='rz'></div>";
       el.querySelector(".t").textContent = en.title;
@@ -365,7 +365,7 @@ function renderSwatches() {
   for (const c of data.settings.categories) {
     const sw = document.createElement("div");
     sw.className = "swatch" + (c.id === modalCat ? " sel" : "");
-    sw.style.background = c.color;
+    sw.style.backgroundColor = c.color;
     sw.title = c.name;
     sw.textContent = c.name.slice(0, 4);
     sw.onclick = () => { modalCat = c.id; renderSwatches(); };
